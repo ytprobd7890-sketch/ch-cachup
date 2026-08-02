@@ -9,7 +9,6 @@ import xml.etree.ElementTree as ET
 from datetime import timezone, timedelta
 from flask import Flask, render_template_string, send_from_directory, jsonify, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
-from viking_uploader import upload_file_to_vikingfile
 
 app = Flask(__name__)
 
@@ -53,7 +52,7 @@ dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (Official VikingFile API)",
+    "status": "Running (Standalone Bug-Free)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -67,8 +66,34 @@ def upload_to_vikingfile(filepath):
     if not api_key:
         return False, "API Key (Key) missing"
         
-    success, result = upload_file_to_vikingfile(filepath, api_key, user_hash)
-    return success, result
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return False, "File empty or missing"
+        
+    try:
+        server_resp = requests.get("https://vikingfile.com/api/get-server", timeout=15)
+        upload_server = "https://upload.vikingfile.com"
+        if server_resp.status_code == 200:
+            try:
+                server_data = server_resp.json()
+                upload_server = server_data.get("server", "https://upload.vikingfile.com")
+            except:
+                pass
+            
+        with open(filepath, "rb") as f:
+            files = {"file": (os.path.basename(filepath), f)}
+            data = {"key": api_key, "user": user_hash}
+            resp = requests.post(upload_server, data=data, files=files, timeout=180)
+            if resp.status_code == 200:
+                try:
+                    res_json = resp.json()
+                    file_url = res_json.get("url", "Uploaded successfully")
+                    return True, file_url
+                except:
+                    return True, "Uploaded successfully"
+            else:
+                return False, f"HTTP Error {resp.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 def get_current_program_info():
     cfg = load_config()
@@ -189,7 +214,7 @@ PRO_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{{ config.channel_name }} - Official VikingFile Pro Server</title>
+    <title>{{ config.channel_name }} - Standalone Pro Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; text-align: center; }
@@ -231,8 +256,8 @@ PRO_HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🎬 {{ config.channel_name }} Official VikingFile Pro</h1>
-        <div class="subtitle">24x7 EPG Catchup & Official VikingFile API Cloud Backup</div>
+        <h1>🎬 {{ config.channel_name }} Standalone Pro</h1>
+        <div class="subtitle">24x7 EPG Catchup & Built-in VikingFile Uploader</div>
         
         <div class="stats-grid">
             <div class="stat-card">
