@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from datetime import timezone, timedelta
 from flask import Flask, render_template_string, send_from_directory, jsonify, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
+from viking_uploader import upload_file_to_vikingfile
 
 app = Flask(__name__)
 
@@ -52,7 +53,7 @@ dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (Deep Bug-Free Audit)",
+    "status": "Running (Official VikingFile API)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -66,34 +67,8 @@ def upload_to_vikingfile(filepath):
     if not api_key:
         return False, "API Key (Key) missing"
         
-    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-        return False, "File empty or missing"
-        
-    try:
-        server_resp = requests.get("https://vikingfile.com/api/get-server", timeout=15)
-        upload_server = "https://upload.vikingfile.com"
-        if server_resp.status_code == 200:
-            try:
-                server_data = server_resp.json()
-                upload_server = server_data.get("server", "https://upload.vikingfile.com")
-            except:
-                pass
-            
-        with open(filepath, "rb") as f:
-            files = {"file": (os.path.basename(filepath), f)}
-            data = {"key": api_key, "user": user_hash}
-            resp = requests.post(upload_server, data=data, files=files, timeout=180)
-            if resp.status_code == 200:
-                try:
-                    res_json = resp.json()
-                    file_url = res_json.get("url", "Uploaded successfully")
-                    return True, file_url
-                except:
-                    return True, "Uploaded successfully"
-            else:
-                return False, f"HTTP Error {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
+    success, result = upload_file_to_vikingfile(filepath, api_key, user_hash)
+    return success, result
 
 def get_current_program_info():
     cfg = load_config()
@@ -214,7 +189,7 @@ PRO_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{{ config.channel_name }} - Deep Bug-Free Pro Server</title>
+    <title>{{ config.channel_name }} - Official VikingFile Pro Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; text-align: center; }
@@ -256,21 +231,21 @@ PRO_HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🎬 {{ config.channel_name }} Deep Bug-Free Server</h1>
-        <div class="subtitle">24x7 EPG Catchup & Robust VikingFile Cloud API Integration</div>
+        <h1>🎬 {{ config.channel_name }} Official VikingFile Pro</h1>
+        <div class="subtitle">24x7 EPG Catchup & Official VikingFile API Cloud Backup</div>
         
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-title">Server Status</div>
-                <div class="stat-value" style="color: #4ade80;">🟢 100% Bug-Free</div>
+                <div class="stat-value" style="color: #4ade80;">🟢 Fully Operational</div>
             </div>
             <div class="stat-card">
                 <div class="stat-title">Current On-Air Show</div>
                 <div class="stat-value" id="current-show">{{ stats.current_show }}</div>
             </div>
             <div class="stat-card">
-                <div class="stat-title">Exceptions Handled</div>
-                <div class="stat-value" style="color: #f43f5e;" id="bug-count">{{ stats.bugs_detected }}</div>
+                <div class="stat-title">Cloud Upload Status</div>
+                <div class="stat-value" style="font-size: 13px;" id="upload-status">{{ stats.last_upload_status }}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-title">Storage Used / Free</div>
@@ -308,7 +283,7 @@ PRO_HTML_TEMPLATE = """
 
         <!-- Cloud API Panel -->
         <div id="cloud-panel" class="panel">
-            <h3>☁️ VikingFile Cloud API Settings</h3>
+            <h3>☁️ Official VikingFile API Settings</h3>
             <form action="/save-cloud" method="POST">
                 <label>VikingFile API Key (Key):</label>
                 <input type="text" name="vikingfile_api_key" value="{{ config.vikingfile_api_key }}" placeholder="e.g. rZ2h9ZqVQi">
@@ -414,7 +389,7 @@ PRO_HTML_TEMPLATE = """
                 .then(res => res.json())
                 .then(data => {
                     document.getElementById('current-show').innerText = data.current_show;
-                    document.getElementById('bug-count').innerText = data.bugs_detected;
+                    document.getElementById('upload-status').innerText = data.last_upload_status;
                 });
         }, 15000);
     </script>
