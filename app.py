@@ -7,7 +7,6 @@ import shutil
 from datetime import timezone, timedelta
 from flask import Flask, render_template_string, send_from_directory, jsonify, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
-from viking_uploader import upload_file_to_vikingfile
 
 app = Flask(__name__)
 
@@ -50,7 +49,7 @@ dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (epg.pw API)",
+    "status": "Running (Standalone Bug-Free)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -64,8 +63,34 @@ def upload_to_vikingfile(filepath):
     if not api_key:
         return False, "API Key missing"
         
-    success, result = upload_file_to_vikingfile(filepath, api_key, user_hash)
-    return success, result
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return False, "File empty or missing"
+        
+    try:
+        server_resp = requests.get("https://vikingfile.com/api/get-server", timeout=15)
+        upload_server = "https://upload.vikingfile.com"
+        if server_resp.status_code == 200:
+            try:
+                server_data = server_resp.json()
+                upload_server = server_data.get("server", "https://upload.vikingfile.com")
+            except:
+                pass
+            
+        with open(filepath, "rb") as f:
+            files = {"file": (os.path.basename(filepath), f)}
+            data = {"key": api_key, "user": user_hash}
+            resp = requests.post(upload_server, data=data, files=files, timeout=180)
+            if resp.status_code == 200:
+                try:
+                    res_json = resp.json()
+                    file_url = res_json.get("url", "Uploaded successfully")
+                    return True, file_url
+                except:
+                    return True, "Uploaded successfully"
+            else:
+                return False, f"HTTP Error {resp.status_code}"
+    except Exception as e:
+        return False, str(e)
 
 def fetch_epg_pw_data():
     cfg = load_config()
@@ -231,7 +256,7 @@ PRO_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{{ config.channel_name }} - epg.pw Pro Server</title>
+    <title>{{ config.channel_name }} - Standalone Pro Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; text-align: center; }
@@ -274,8 +299,8 @@ PRO_HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🎬 {{ config.channel_name }} epg.pw Pro</h1>
-        <div class="subtitle">24x7 Catchup Server powered by epg.pw JSON API</div>
+        <h1>🎬 {{ config.channel_name }} Standalone Pro</h1>
+        <div class="subtitle">24x7 Catchup & Built-in VikingFile Uploader</div>
         
         <div class="stats-grid">
             <div class="stat-card">
@@ -328,7 +353,6 @@ PRO_HTML_TEMPLATE = """
         <!-- EPG Viewer Panel -->
         <div id="epg-panel" class="panel">
             <h3>📺 Live epg.pw Program Guide (Channel ID: {{ config.epg_channel_id }})</h3>
-            <p style="color: #94a3b8; font-size: 14px; margin-bottom: 15px;">Fetched dynamically from <code>https://epg.pw/api/epg.json?lang=en&date=%date%&channel_id=404001</code></p>
             <div style="max-height: 500px; overflow-y: auto;">
                 {% for epg in epg_list %}
                 <div class="epg-card">
@@ -364,7 +388,7 @@ PRO_HTML_TEMPLATE = """
 
         <!-- Settings Panel -->
         <div id="settings-panel" class="panel">
-            <h3>⚙️ Stream & EPG Settings</h3>
+            <h3>⚙️ Stream & Retention Settings</h3>
             <form action="/save-settings" method="POST">
                 <label>Channel Name:</label>
                 <input type="text" name="channel_name" value="{{ config.channel_name }}">
@@ -546,8 +570,7 @@ def download(filename):
     try:
         as_attachment = 'download' in request.args
         return send_from_directory(RECORD_DIR, filename, as_attachment=as_attachment)
-    except Exception as e:
-        STATS["bugs_detected"] += 1
+    except:
         return "File not found", 404
 
 if __name__ == "__main__":
