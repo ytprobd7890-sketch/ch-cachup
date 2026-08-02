@@ -5,14 +5,9 @@
   "retention_days": 7,
   "timezone_offset_hours": 6,
   "target_epg_channels": ["625", "1977", "0-9-zeebangla", "0-9-9z5383484"],
-  "custom_show_aliases": {
-    "Saat Paake Bandha": "Saat_Paake_Bandha_New_Episode"
-  },
-  "custom_catchup_schedules": [
-    {
-      "show_name": "Saat Paake Bandha",
-      "start_time": "17:00",
-      "duration_minutes": 35
-    }
-  ]
+  "custom_show_aliases": {},
+  "custom_catchup_schedules": [],
+  "vikingfile_api_key": "",
+  "vikingfile_user_hash": "",
+  "auto_upload_cloud": true
 }
