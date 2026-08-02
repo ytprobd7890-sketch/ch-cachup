@@ -10,8 +10,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
-CONFIG_PATH = "config.json"
-RECORD_DIR = "zee_bangla_archives"
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+RECORD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zee_bangla_archives")
 os.makedirs(RECORD_DIR, exist_ok=True)
 
 def load_config():
@@ -34,17 +34,16 @@ def load_config():
         "auto_upload_cloud": True
     }
 
-def save_config(config):
+def save_config(config_data):
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+            json.dump(config_data, f, indent=2)
         return True
     except Exception as e:
         print(f"[-] Config save error: {e}")
         return False
 
-config = load_config()
-dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
+dhaka_tz = timezone(timedelta(hours=load_config().get("timezone_offset_hours", 6)))
 
 STATS = {
     "total_segments_recorded": 0,
@@ -246,7 +245,7 @@ def cleanup_old_files():
 
 scheduler = BackgroundScheduler()
 try:
-    scheduler.add_job(func=record_chunk, trigger="interval", seconds=config.get("record_interval_seconds", 10), id="record_job", replace_existing=True)
+    scheduler.add_job(func=record_chunk, trigger="interval", seconds=load_config().get("record_interval_seconds", 10), id="record_job", replace_existing=True)
     scheduler.add_job(func=cleanup_old_files, trigger="interval", hours=6, id="cleanup_job", replace_existing=True)
     scheduler.start()
 except Exception as e:
