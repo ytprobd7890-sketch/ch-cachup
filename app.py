@@ -52,7 +52,7 @@ dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (Standalone Bug-Free)",
+    "status": "Running (EPG Viewer Pro)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -94,6 +94,65 @@ def upload_to_vikingfile(filepath):
                 return False, f"HTTP Error {resp.status_code}"
     except Exception as e:
         return False, str(e)
+
+def get_epg_schedule_list():
+    cfg = load_config()
+    epg_path = "/tmp/epg.xml.gz"
+    if not os.path.exists(epg_path):
+        try:
+            urllib_url = "https://mitthu786.github.io/tvepg/epg.xml.gz"
+            import urllib.request
+            urllib.request.urlretrieve(urllib_url, epg_path)
+        except:
+            return []
+            
+    schedules = []
+    try:
+        with gzip.open(epg_path, "rb") as f:
+            target_channels = set(cfg.get("target_epg_channels", ["625", "1977", "0-9-zeebangla", "0-9-9z5383484"]))
+            now_dhaka = datetime.datetime.now(dhaka_tz)
+            
+            for event, elem in ET.iterparse(f, events=("end",)):
+                if elem.tag == "programme":
+                    channel = elem.get("channel")
+                    if channel in target_channels:
+                        start_str = elem.get("start", "")
+                        stop_str = elem.get("stop", "")
+                        try:
+                            start_utc = datetime.datetime.strptime(start_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+                            stop_utc = datetime.datetime.strptime(stop_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+                            
+                            start_dhaka = start_utc.astimezone(dhaka_tz)
+                            stop_dhaka = stop_utc.astimezone(dhaka_tz)
+                            
+                            title_elem = elem.find("title")
+                            title = title_elem.text if title_elem is not None else "Unknown Show"
+                            
+                            desc_elem = elem.find("desc")
+                            desc = desc_elem.text if desc_elem is not None else "No description available."
+                            
+                            status = "Upcoming"
+                            if start_dhaka <= now_dhaka <= stop_dhaka:
+                                status = "🟢 On-Air Now"
+                            elif stop_dhaka < now_dhaka:
+                                status = "✔️ Completed"
+                                
+                            schedules.append({
+                                "title": title,
+                                "start": start_dhaka.strftime("%Y-%m-%d %H:%M"),
+                                "stop": stop_dhaka.strftime("%Y-%m-%d %H:%M"),
+                                "desc": desc,
+                                "status": status
+                            })
+                        except:
+                            pass
+                elem.clear()
+    except Exception as e:
+        print("EPG parse error:", e)
+        
+    # Sort schedules by start time descending
+    schedules.sort(key=lambda x: x["start"], reverse=True)
+    return schedules[:100] # Return latest 100 entries
 
 def get_current_program_info():
     cfg = load_config()
@@ -214,7 +273,7 @@ PRO_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{{ config.channel_name }} - Standalone Pro Server</title>
+    <title>{{ config.channel_name }} - EPG Viewer Pro Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; text-align: center; }
@@ -235,6 +294,7 @@ PRO_HTML_TEMPLATE = """
         ul { list-style: none; padding: 0; margin: 0; max-height: 450px; overflow-y: auto; }
         li { background: #0f172a; margin: 10px 0; padding: 15px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #334155; flex-wrap: wrap; gap: 10px; }
         .file-name { font-weight: 500; font-size: 14px; word-break: break-all; margin-right: 15px; }
+        .epg-card { background: #0f172a; margin: 10px 0; padding: 15px; border-radius: 8px; border: 1px solid #334155; display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px; }
         .btn-group { display: flex; gap: 10px; flex-shrink: 0; }
         .btn { padding: 8px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: bold; cursor: pointer; display: inline-block; border: none; }
         .btn-play { background: #0284c7; color: #fff; }
@@ -256,8 +316,8 @@ PRO_HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🎬 {{ config.channel_name }} Standalone Pro</h1>
-        <div class="subtitle">24x7 EPG Catchup & Built-in VikingFile Uploader</div>
+        <h1>🎬 {{ config.channel_name }} EPG Viewer Pro</h1>
+        <div class="subtitle">24x7 EPG Live Guide Viewer & Catchup Server</div>
         
         <div class="stats-grid">
             <div class="stat-card">
@@ -280,6 +340,7 @@ PRO_HTML_TEMPLATE = """
 
         <div class="nav-tabs">
             <button class="tab-btn active" onclick="switchTab('archive')">📁 Recorded Archive</button>
+            <button class="tab-btn" onclick="switchTab('epg')">📺 Live EPG Viewer</button>
             <button class="tab-btn" onclick="switchTab('cloud')">☁️ VikingFile API</button>
             <button class="tab-btn" onclick="switchTab('settings')">⚙️ Stream Settings</button>
         </div>
@@ -304,6 +365,24 @@ PRO_HTML_TEMPLATE = """
                 </li>
                 {% endfor %}
             </ul>
+        </div>
+
+        <!-- EPG Viewer Panel -->
+        <div id="epg-panel" class="panel">
+            <h3>📺 Live EPG Program Guide (Asia/Dhaka)</h3>
+            <p style="color: #94a3b8; font-size: 14px; margin-bottom: 15px;">Real-time program schedule loaded directly from XMLTV EPG feed.</p>
+            <div style="max-height: 500px; overflow-y: auto;">
+                {% for epg in epg_list %}
+                <div class="epg-card">
+                    <div>
+                        <h4 style="margin: 0 0 5px 0; color: #38bdf8;">{{ epg.title }}</h4>
+                        <p style="margin: 0 0 8px 0; font-size: 12px; color: #94a3b8;">🕒 {{ epg.start }} &rarr; {{ epg.stop }}</p>
+                        <p style="margin: 0; font-size: 13px; color: #cbd5e1;">{{ epg.desc }}</p>
+                    </div>
+                    <span style="font-size: 12px; font-weight: bold; padding: 4px 8px; border-radius: 4px; background: #334155; color: #4ade80; flex-shrink: 0;">{{ epg.status }}</span>
+                </div>
+                {% endfor %}
+            </div>
         </div>
 
         <!-- Cloud API Panel -->
@@ -362,11 +441,14 @@ PRO_HTML_TEMPLATE = """
             if(tab === 'archive') {
                 document.querySelectorAll('.tab-btn')[0].classList.add('active');
                 document.getElementById('archive-panel').classList.add('active');
-            } else if(tab === 'cloud') {
+            } else if(tab === 'epg') {
                 document.querySelectorAll('.tab-btn')[1].classList.add('active');
+                document.getElementById('epg-panel').classList.add('active');
+            } else if(tab === 'cloud') {
+                document.querySelectorAll('.tab-btn')[2].classList.add('active');
                 document.getElementById('cloud-panel').classList.add('active');
             } else {
-                document.querySelectorAll('.tab-btn')[2].classList.add('active');
+                document.querySelectorAll('.tab-btn')[3].classList.add('active');
                 document.getElementById('settings-panel').classList.add('active');
             }
         }
@@ -437,8 +519,10 @@ def index():
         disk_str = f"{used_gb:.1f} GB Used / {free_gb:.1f} GB Free"
     except:
         disk_str = "N/A"
+        
+    epg_list = get_epg_schedule_list()
     
-    return render_template_string(PRO_HTML_TEMPLATE, files=files, stats=STATS, config=cfg, disk_usage=disk_str)
+    return render_template_string(PRO_HTML_TEMPLATE, files=files, stats=STATS, config=cfg, disk_usage=disk_str, epg_list=epg_list)
 
 @app.route("/api/stats")
 def api_stats():
