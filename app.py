@@ -2,13 +2,12 @@ import os
 import time
 import datetime
 import requests
-import gzip
 import json
 import shutil
-import xml.etree.ElementTree as ET
 from datetime import timezone, timedelta
 from flask import Flask, render_template_string, send_from_directory, jsonify, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
+from viking_uploader import upload_file_to_vikingfile
 
 app = Flask(__name__)
 
@@ -29,9 +28,8 @@ def load_config():
         "record_interval_seconds": 10,
         "retention_days": 7,
         "timezone_offset_hours": 6,
-        "target_epg_channels": ["625", "1977", "0-9-zeebangla", "0-9-9z5383484"],
+        "epg_channel_id": "404001",
         "custom_show_aliases": {},
-        "custom_catchup_schedules": [],
         "vikingfile_api_key": "",
         "vikingfile_user_hash": "",
         "auto_upload_cloud": True
@@ -52,7 +50,7 @@ dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (EPG Viewer Pro)",
+    "status": "Running (epg.pw API)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -64,95 +62,69 @@ def upload_to_vikingfile(filepath):
     user_hash = cfg.get("vikingfile_user_hash", "").strip()
     
     if not api_key:
-        return False, "API Key (Key) missing"
+        return False, "API Key missing"
         
-    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-        return False, "File empty or missing"
-        
+    success, result = upload_file_to_vikingfile(filepath, api_key, user_hash)
+    return success, result
+
+def fetch_epg_pw_data():
+    cfg = load_config()
+    now_dhaka = datetime.datetime.now(dhaka_tz)
+    date_str = now_dhaka.strftime("%Y%m%d")
+    channel_id = cfg.get("epg_channel_id", "404001")
+    
+    url = f"https://epg.pw/api/epg.json?lang=en&date={date_str}&channel_id={channel_id}"
     try:
-        server_resp = requests.get("https://vikingfile.com/api/get-server", timeout=15)
-        upload_server = "https://upload.vikingfile.com"
-        if server_resp.status_code == 200:
-            try:
-                server_data = server_resp.json()
-                upload_server = server_data.get("server", "https://upload.vikingfile.com")
-            except:
-                pass
-            
-        with open(filepath, "rb") as f:
-            files = {"file": (os.path.basename(filepath), f)}
-            data = {"key": api_key, "user": user_hash}
-            resp = requests.post(upload_server, data=data, files=files, timeout=180)
-            if resp.status_code == 200:
-                try:
-                    res_json = resp.json()
-                    file_url = res_json.get("url", "Uploaded successfully")
-                    return True, file_url
-                except:
-                    return True, "Uploaded successfully"
-            else:
-                return False, f"HTTP Error {resp.status_code}"
+        req = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if req.status_code == 200:
+            return req.json()
     except Exception as e:
-        return False, str(e)
+        STATS["bugs_detected"] += 1
+    return None
 
 def get_epg_schedule_list():
-    cfg = load_config()
-    epg_path = "/tmp/epg.xml.gz"
-    if not os.path.exists(epg_path):
-        try:
-            urllib_url = "https://mitthu786.github.io/tvepg/epg.xml.gz"
-            import urllib.request
-            urllib.request.urlretrieve(urllib_url, epg_path)
-        except:
-            return []
-            
-    schedules = []
-    try:
-        with gzip.open(epg_path, "rb") as f:
-            target_channels = set(cfg.get("target_epg_channels", ["625", "1977", "0-9-zeebangla", "0-9-9z5383484"]))
-            now_dhaka = datetime.datetime.now(dhaka_tz)
-            
-            for event, elem in ET.iterparse(f, events=("end",)):
-                if elem.tag == "programme":
-                    channel = elem.get("channel")
-                    if channel in target_channels:
-                        start_str = elem.get("start", "")
-                        stop_str = elem.get("stop", "")
-                        try:
-                            start_utc = datetime.datetime.strptime(start_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-                            stop_utc = datetime.datetime.strptime(stop_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-                            
-                            start_dhaka = start_utc.astimezone(dhaka_tz)
-                            stop_dhaka = stop_utc.astimezone(dhaka_tz)
-                            
-                            title_elem = elem.find("title")
-                            title = title_elem.text if title_elem is not None else "Unknown Show"
-                            
-                            desc_elem = elem.find("desc")
-                            desc = desc_elem.text if desc_elem is not None else "No description available."
-                            
-                            status = "Upcoming"
-                            if start_dhaka <= now_dhaka <= stop_dhaka:
-                                status = "🟢 On-Air Now"
-                            elif stop_dhaka < now_dhaka:
-                                status = "✔️ Completed"
-                                
-                            schedules.append({
-                                "title": title,
-                                "start": start_dhaka.strftime("%Y-%m-%d %H:%M"),
-                                "stop": stop_dhaka.strftime("%Y-%m-%d %H:%M"),
-                                "desc": desc,
-                                "status": status
-                            })
-                        except:
-                            pass
-                elem.clear()
-    except Exception as e:
-        print("EPG parse error:", e)
+    data = fetch_epg_pw_data()
+    if not data or "epg_list" not in data:
+        return []
         
-    # Sort schedules by start time descending
+    epg_list = data.get("epg_list", [])
+    now_dhaka = datetime.datetime.now(dhaka_tz)
+    schedules = []
+    
+    for i, prog in enumerate(epg_list):
+        title = prog.get("title", "Unknown Show")
+        start_str = prog.get("start_date", "")
+        desc = prog.get("desc", "No description available.")
+        
+        try:
+            start_utc = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            start_dhaka = start_utc.astimezone(dhaka_tz)
+            
+            if i + 1 < len(epg_list):
+                next_start_str = epg_list[i + 1].get("start_date", "")
+                stop_utc = datetime.datetime.fromisoformat(next_start_str.replace("Z", "+00:00"))
+                stop_dhaka = stop_utc.astimezone(dhaka_tz)
+            else:
+                stop_dhaka = start_dhaka + timedelta(hours=1)
+                
+            status = "Upcoming"
+            if start_dhaka <= now_dhaka <= stop_dhaka:
+                status = "🟢 On-Air Now"
+            elif stop_dhaka < now_dhaka:
+                status = "✔️ Completed"
+                
+            schedules.append({
+                "title": title,
+                "start": start_dhaka.strftime("%Y-%m-%d %H:%M"),
+                "stop": stop_dhaka.strftime("%Y-%m-%d %H:%M"),
+                "desc": desc,
+                "status": status
+            })
+        except:
+            pass
+            
     schedules.sort(key=lambda x: x["start"], reverse=True)
-    return schedules[:100] # Return latest 100 entries
+    return schedules
 
 def get_current_program_info():
     cfg = load_config()
@@ -160,54 +132,40 @@ def get_current_program_info():
     default_name = f"{cfg['channel_name'].replace(' ', '')}_{now_dhaka.strftime('%Y-%m-%d_%H-%M-%S')}(Asia_Dhaka).mp4"
     default_title = cfg['channel_name']
     
-    epg_path = "/tmp/epg.xml.gz"
-    if not os.path.exists(epg_path):
-        try:
-            urllib_url = "https://mitthu786.github.io/tvepg/epg.xml.gz"
-            import urllib.request
-            urllib.request.urlretrieve(urllib_url, epg_path)
-        except Exception as e:
-            STATS["bugs_detected"] += 1
-            return default_title, default_name
-            
-    try:
-        with gzip.open(epg_path, "rb") as f:
-            target_channels = set(cfg.get("target_epg_channels", ["625", "1977", "0-9-zeebangla", "0-9-9z5383484"]))
-            aliases = cfg.get("custom_show_aliases", {})
-            
-            for event, elem in ET.iterparse(f, events=("end",)):
-                if elem.tag == "programme":
-                    channel = elem.get("channel")
-                    if channel in target_channels:
-                        start_str = elem.get("start", "")
-                        stop_str = elem.get("stop", "")
-                        try:
-                            start_utc = datetime.datetime.strptime(start_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-                            stop_utc = datetime.datetime.strptime(stop_str.split()[0][:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-                            
-                            start_dhaka = start_utc.astimezone(dhaka_tz)
-                            stop_dhaka = stop_utc.astimezone(dhaka_tz)
-                            
-                            if start_dhaka <= now_dhaka <= stop_dhaka:
-                                title_elem = elem.find("title")
-                                title = title_elem.text if title_elem is not None else cfg['channel_name']
-                                
-                                for key, alias in aliases.items():
-                                    if key.lower() in title.lower():
-                                        title = alias
-                                        break
-                                        
-                                sanitized = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip()
-                                time_str = start_dhaka.strftime("%Y-%m-%d_%H-%M")
-                                duration_min = int((stop_dhaka - start_dhaka).total_seconds() / 60)
-                                elem.clear()
-                                return f"{title} ({duration_min}m EPG)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
-                        except:
-                            pass
-                elem.clear()
-    except Exception as e:
-        STATS["bugs_detected"] += 1
+    data = fetch_epg_pw_data()
+    if not data or "epg_list" not in data:
+        return default_title, default_name
         
+    epg_list = data.get("epg_list", [])
+    aliases = cfg.get("custom_show_aliases", {})
+    
+    for i, prog in enumerate(epg_list):
+        title = prog.get("title", default_title)
+        start_str = prog.get("start_date", "")
+        try:
+            start_utc = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            start_dhaka = start_utc.astimezone(dhaka_tz)
+            
+            if i + 1 < len(epg_list):
+                next_start_str = epg_list[i + 1].get("start_date", "")
+                stop_utc = datetime.datetime.fromisoformat(next_start_str.replace("Z", "+00:00"))
+                stop_dhaka = stop_utc.astimezone(dhaka_tz)
+            else:
+                stop_dhaka = start_dhaka + timedelta(hours=1)
+                
+            if start_dhaka <= now_dhaka <= stop_dhaka:
+                for key, alias in aliases.items():
+                    if key.lower() in title.lower():
+                        title = alias
+                        break
+                        
+                sanitized = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip()
+                time_str = start_dhaka.strftime("%Y-%m-%d_%H-%M")
+                duration_min = int((stop_dhaka - start_dhaka).total_seconds() / 60)
+                return f"{title} ({duration_min}m EPG.pw)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
+        except:
+            pass
+            
     return default_title, default_name
 
 def record_chunk():
@@ -273,7 +231,7 @@ PRO_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>{{ config.channel_name }} - EPG Viewer Pro Server</title>
+    <title>{{ config.channel_name }} - epg.pw Pro Server</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; text-align: center; }
@@ -316,8 +274,8 @@ PRO_HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🎬 {{ config.channel_name }} EPG Viewer Pro</h1>
-        <div class="subtitle">24x7 EPG Live Guide Viewer & Catchup Server</div>
+        <h1>🎬 {{ config.channel_name }} epg.pw Pro</h1>
+        <div class="subtitle">24x7 Catchup Server powered by epg.pw JSON API</div>
         
         <div class="stats-grid">
             <div class="stat-card">
@@ -340,7 +298,7 @@ PRO_HTML_TEMPLATE = """
 
         <div class="nav-tabs">
             <button class="tab-btn active" onclick="switchTab('archive')">📁 Recorded Archive</button>
-            <button class="tab-btn" onclick="switchTab('epg')">📺 Live EPG Viewer</button>
+            <button class="tab-btn" onclick="switchTab('epg')">📺 Live epg.pw Guide</button>
             <button class="tab-btn" onclick="switchTab('cloud')">☁️ VikingFile API</button>
             <button class="tab-btn" onclick="switchTab('settings')">⚙️ Stream Settings</button>
         </div>
@@ -369,8 +327,8 @@ PRO_HTML_TEMPLATE = """
 
         <!-- EPG Viewer Panel -->
         <div id="epg-panel" class="panel">
-            <h3>📺 Live EPG Program Guide (Asia/Dhaka)</h3>
-            <p style="color: #94a3b8; font-size: 14px; margin-bottom: 15px;">Real-time program schedule loaded directly from XMLTV EPG feed.</p>
+            <h3>📺 Live epg.pw Program Guide (Channel ID: {{ config.epg_channel_id }})</h3>
+            <p style="color: #94a3b8; font-size: 14px; margin-bottom: 15px;">Fetched dynamically from <code>https://epg.pw/api/epg.json?lang=en&date=%date%&channel_id=404001</code></p>
             <div style="max-height: 500px; overflow-y: auto;">
                 {% for epg in epg_list %}
                 <div class="epg-card">
@@ -406,13 +364,16 @@ PRO_HTML_TEMPLATE = """
 
         <!-- Settings Panel -->
         <div id="settings-panel" class="panel">
-            <h3>⚙️ Stream & Retention Settings</h3>
+            <h3>⚙️ Stream & EPG Settings</h3>
             <form action="/save-settings" method="POST">
                 <label>Channel Name:</label>
                 <input type="text" name="channel_name" value="{{ config.channel_name }}">
                 
                 <label>Stream URL (M3U8 / TS):</label>
                 <input type="text" name="stream_url" value="{{ config.stream_url }}">
+                
+                <label>epg.pw Channel ID:</label>
+                <input type="text" name="epg_channel_id" value="{{ config.epg_channel_id }}">
                 
                 <label>Recording Interval (Seconds):</label>
                 <input type="number" name="record_interval_seconds" value="{{ config.record_interval_seconds }}">
@@ -534,6 +495,7 @@ def save_settings():
         cfg = load_config()
         cfg["channel_name"] = request.form.get("channel_name", cfg["channel_name"])
         cfg["stream_url"] = request.form.get("stream_url", cfg["stream_url"])
+        cfg["epg_channel_id"] = request.form.get("epg_channel_id", cfg["epg_channel_id"])
         cfg["record_interval_seconds"] = int(request.form.get("record_interval_seconds", cfg["record_interval_seconds"]))
         cfg["retention_days"] = int(request.form.get("retention_days", cfg["retention_days"]))
         save_config(cfg)
