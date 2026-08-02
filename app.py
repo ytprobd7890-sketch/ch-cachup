@@ -7,6 +7,7 @@ import shutil
 from datetime import timezone, timedelta
 from flask import Flask, render_template_string, send_from_directory, jsonify, request, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
+from viking_uploader import upload_file_to_vikingfile
 
 app = Flask(__name__)
 
@@ -43,12 +44,13 @@ def save_config(config_data):
         print(f"[-] Config save error: {e}")
         return False
 
-dhaka_tz = timezone(timedelta(hours=load_config().get("timezone_offset_hours", 6)))
+config = load_config()
+dhaka_tz = timezone(timedelta(hours=config.get("timezone_offset_hours", 6)))
 
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (Catchup Active)",
+    "status": "Running (Official API & Redirect Resolver)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -59,37 +61,9 @@ def upload_to_vikingfile(filepath):
     api_key = cfg.get("vikingfile_api_key", "").strip()
     user_hash = cfg.get("vikingfile_user_hash", "").strip()
     
-    if not api_key:
-        return False, "API Key missing"
-        
-    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-        return False, "File empty or missing"
-        
-    try:
-        server_resp = requests.get("https://vikingfile.com/api/get-server", timeout=15)
-        upload_server = "https://upload.vikingfile.com"
-        if server_resp.status_code == 200:
-            try:
-                server_data = server_resp.json()
-                upload_server = server_data.get("server", "https://upload.vikingfile.com")
-            except:
-                pass
-            
-        with open(filepath, "rb") as f:
-            files = {"file": (os.path.basename(filepath), f)}
-            data = {"key": api_key, "user": user_hash}
-            resp = requests.post(upload_server, data=data, files=files, timeout=180)
-            if resp.status_code == 200:
-                try:
-                    res_json = resp.json()
-                    file_url = res_json.get("url", "Uploaded successfully")
-                    return True, file_url
-                except:
-                    return True, "Uploaded successfully"
-            else:
-                return False, f"HTTP Error {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
+    # No hardcoded API required: supports anonymous upload if api_key is empty
+    success, result = upload_file_to_vikingfile(filepath, api_key, user_hash)
+    return success, result
 
 def fetch_epg_pw_data():
     cfg = load_config()
@@ -186,7 +160,7 @@ def get_current_program_info():
                 sanitized = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip()
                 time_str = start_dhaka.strftime("%Y-%m-%d_%H-%M")
                 duration_min = int((stop_dhaka - start_dhaka).total_seconds() / 60)
-                return f"{title} ({duration_min}m)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
+                return f"{title} ({duration_min}m EPG.pw)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
         except:
             pass
             
@@ -219,7 +193,7 @@ def record_chunk():
                     STATS["total_segments_recorded"] += 1
                     STATS["last_record_time"] = datetime.datetime.now(dhaka_tz).strftime("%Y-%m-%d %H:%M:%S")
                     
-                    if cfg.get("auto_upload_cloud", True) and cfg.get("vikingfile_api_key"):
+                    if cfg.get("auto_upload_cloud", True):
                         success, msg = upload_to_vikingfile(chunk_file)
                         STATS["last_upload_status"] = f"Success: {msg}" if success else f"Failed: {msg}"
     except Exception as e:
@@ -544,7 +518,6 @@ def save_cloud():
         STATS["bugs_detected"] += 1
     return redirect(url_for("index"))
 
-@app.route(hq := "/upload-cloud/<path:filename>") # safe alias
 @app.route("/upload-cloud/<path:filename>")
 def upload_cloud_manual(filename):
     try:
