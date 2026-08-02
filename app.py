@@ -48,7 +48,7 @@ dhaka_tz = timezone(timedelta(hours=load_config().get("timezone_offset_hours", 6
 STATS = {
     "total_segments_recorded": 0,
     "last_record_time": "Never",
-    "status": "Running (Standalone Bug-Free)",
+    "status": "Running (Catchup Active)",
     "current_show": "Loading EPG...",
     "last_upload_status": "Idle",
     "bugs_detected": 0
@@ -201,15 +201,16 @@ def record_chunk():
         chunk_file = os.path.join(RECORD_DIR, target_filename)
         
         headers = {"User-Agent": "VLC/3.0.16"}
-        resp = requests.get(cfg["stream_url"], headers=headers, timeout=15)
+        resp = requests.get(cfg["stream_url"], headers=headers, allow_redirects=True, timeout=15)
         if resp.status_code == 200:
             lines = resp.text.splitlines()
             ts_urls = [line.strip() for line in lines if line and not line.startswith("#")]
             if ts_urls:
-                base_match = cfg["stream_url"].rsplit('/', 1)[0]
+                parsed_base = resp.url.split("://")[1].split("/")[0]
+                proto = resp.url.split("://")[0]
                 latest_segment = ts_urls[-1]
                 if not latest_segment.startswith("http"):
-                    latest_segment = f"{base_match}/{latest_segment}"
+                    latest_segment = f"{proto}://{parsed_base}{latest_segment}"
                     
                 seg_resp = requests.get(latest_segment, headers=headers, timeout=15)
                 if seg_resp.status_code == 200 and len(seg_resp.content) > 0:
@@ -543,6 +544,7 @@ def save_cloud():
         STATS["bugs_detected"] += 1
     return redirect(url_for("index"))
 
+@app.route(hq := "/upload-cloud/<path:filename>") # safe alias
 @app.route("/upload-cloud/<path:filename>")
 def upload_cloud_manual(filename):
     try:
