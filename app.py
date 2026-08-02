@@ -186,7 +186,7 @@ def get_current_program_info():
                 sanitized = "".join(c if c.isalnum() or c in " _-" else "_" for c in title).strip()
                 time_str = start_dhaka.strftime("%Y-%m-%d_%H-%M")
                 duration_min = int((stop_dhaka - start_dhaka).total_seconds() / 60)
-                return f"{title} ({duration_min}m EPG.pw)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
+                return f"{title} ({duration_min}m)", f"{sanitized}_{time_str}(Asia_Dhaka).mp4"
         except:
             pass
             
